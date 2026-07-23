@@ -1,0 +1,205 @@
+import os
+import asyncio
+import discord
+from discord.ext import commands
+
+# Enable necessary bot intents
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="?", intents=intents)
+
+# ⚙️ CONFIGURATION IDs
+CATEGORY_ID = 1415435034260799499
+STAFF_REPORT_ROLE_ID = 1464906083075100816
+GENERAL_ASSISTANCE_ROLE_IDS = [1415787686308085761, 1526984826609991801]
+
+ticket_counter = 1
+
+# Helper function to find the ticket creator even after bot restarts
+async def get_ticket_owner(channel: discord.TextChannel):
+    if channel.topic and channel.topic.isdigit():
+        user_id = int(channel.topic)
+        member = channel.guild.get_member(user_id)
+        if member:
+            return member
+        try:
+            return await channel.guild.fetch_member(user_id)
+        except:
+            pass
+    for target in channel.overwrites:
+        if isinstance(target, discord.Member) and not target.bot:
+            return target
+    return None
+
+
+# -------------------------------------------------------------
+# 3 BUTTONS: CLOSE, RE-OPEN, DELETE
+# -------------------------------------------------------------
+class TicketControlView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, custom_id="btn_close_ticket_perm")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        owner = await get_ticket_owner(interaction.channel)
+
+        if owner:
+            # Hide channel from ticket owner
+            await interaction.channel.set_permissions(owner, read_messages=False, send_messages=False)
+            await interaction.followup.send(f"🔒 Ticket closed! {owner.mention} can no longer see this ticket.")
+        else:
+            await interaction.followup.send("❌ Could not find ticket creator to hide permissions.", ephemeral=True)
+
+    @discord.ui.button(label="Re-open", style=discord.ButtonStyle.success, custom_id="btn_reopen_ticket_perm")
+    async def reopen_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        owner = await get_ticket_owner(interaction.channel)
+
+        if owner:
+            # Show channel to ticket owner again
+            await interaction.channel.set_permissions(owner, read_messages=True, send_messages=True, attach_files=True)
+            await interaction.followup.send(f"🔓 Ticket re-opened! {owner.mention} can see this ticket again.")
+        else:
+            await interaction.followup.send("❌ Could not find ticket creator to restore permissions.", ephemeral=True)
+
+    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger, custom_id="btn_delete_ticket_perm")
+    async def delete_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("🗑️ Deleting ticket forever in 5 seconds...")
+        await asyncio.sleep(5)
+        await interaction.channel.delete()
+
+
+# -------------------------------------------------------------
+# REASON MODAL (Pop-up window)
+# -------------------------------------------------------------
+class TicketReasonModal(discord.ui.Modal, title="Ticket Reason"):
+    reason_input = discord.ui.TextInput(
+        label="Reason",
+        style=discord.TextStyle.paragraph,
+        placeholder="Type the reason for your ticket here...",
+        required=True,
+        max_length=1000
+    )
+
+    def __init__(self, ticket_type: str):
+        super().__init__()
+        self.ticket_type = ticket_type
+
+    async def on_submit(self, interaction: discord.Interaction):
+        global ticket_counter
+        await interaction.response.defer(ephemeral=True)
+
+        guild = interaction.guild
+        user = interaction.user
+        category = guild.get_channel(CATEGORY_ID)
+
+        if not category or not isinstance(category, discord.CategoryChannel):
+            await interaction.followup.send("❌ Error: Ticket category channel not found!", ephemeral=True)
+            return
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            user: discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
+        }
+
+        # Handle Role Visibility logic
+        if self.ticket_type == "staff_report":
+            role = guild.get_role(STAFF_REPORT_ROLE_ID)
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        elif self.ticket_type == "general_assistance":
+            for role_id in GENERAL_ASSISTANCE_ROLE_IDS:
+                role = guild.get_role(role_id)
+                if role:
+                    overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+        channel_name = f"ticket-{ticket_counter}"
+        ticket_counter += 1
+
+        try:
+            # Store creator ID in channel topic for Close/Re-open references
+            ticket_channel = await category.create_text_channel(
+                name=channel_name,
+                overwrites=overwrites,
+                topic=str(user.id)
+            )
+        except Exception as e:
+            await interaction.followup.send(f"❌ Failed to create ticket: {e}", ephemeral=True)
+            return
+
+        type_display = "Staff Report" if self.ticket_type == "staff_report" else "General Assistance"
+        embed = discord.Embed(
+            title=f"🎟️ Ticket: {type_display}",
+            description=f"Welcome {user.mention}!\n\n**Reason:**\n```{self.reason_input.value}```\n\nUse the buttons below to manage this ticket.",
+            color=discord.Color.green()
+        )
+        embed.set_footer(text=f"Channel: #{channel_name}")
+
+        # Send ticket view with Close, Re-open, and Delete
+        await ticket_channel.send(content=f"{user.mention}", embed=embed, view=TicketControlView())
+        await interaction.followup.send(f"✅ Ticket created! Go to {ticket_channel.mention}", ephemeral=True)
+
+
+# -------------------------------------------------------------
+# CATEGORY SELECTION POP-UP
+# -------------------------------------------------------------
+class TicketTypeView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label="Staff Report", style=discord.ButtonStyle.danger, custom_id="btn_staff_report")
+    async def staff_report(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TicketReasonModal(ticket_type="staff_report"))
+
+    @discord.ui.button(label="General Assistance", style=discord.ButtonStyle.primary, custom_id="btn_general_assistance")
+    async def general_assistance(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TicketReasonModal(ticket_type="general_assistance"))
+
+
+# -------------------------------------------------------------
+# INITIAL TICKET GUI ("Create a Ticket" button)
+# -------------------------------------------------------------
+class CreateTicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Create a Ticket", style=discord.ButtonStyle.green, custom_id="btn_create_ticket_main")
+    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="Ticket Category",
+            description="Please select **Staff Report** or **General Assistance**:",
+            color=discord.Color.blue()
+        )
+        await interaction.response.send_message(embed=embed, view=TicketTypeView(), ephemeral=True)
+
+
+# -------------------------------------------------------------
+# BOT EVENTS & COMMANDS
+# -------------------------------------------------------------
+@bot.event
+async def on_ready():
+    bot.add_view(CreateTicketView())
+    bot.add_view(TicketControlView())
+    print(f"Logged in as {bot.user} - Ticket system active! 🔥")
+
+@bot.command(name="ticket")
+@commands.has_permissions(administrator=True)
+async def spawn_ticket(ctx):
+    try:
+        await ctx.message.delete()
+    except:
+        pass
+
+    embed = discord.Embed(
+        title="📩 Support Tickets",
+        description="create a ticket for any help or report",
+        color=discord.Color.green()
+    )
+    await ctx.send(embed=embed, view=CreateTicketView())
+
+bot.run(os.getenv("BOT_TOKEN"))
