@@ -202,4 +202,4 @@ async def spawn_ticket(ctx):
     )
     await ctx.send(embed=embed, view=CreateTicketView())
 
-bot.run(os.getenv("BOT_TOKEN"))
+bot.run(os.getenv("MTUxOTI1OTkzOTQ1MTcwMzQxNw.Gfs114.upgsMOz4ty7LzCNuxclPXFpSeD6uom3lQbhUGo"))
